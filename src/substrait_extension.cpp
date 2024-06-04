@@ -136,11 +136,14 @@ static DuckDBToSubstrait InitPlanExtractor(ClientContext &context, ToSubstraitFu
 	set<OptimizerType> disabled_optimizers = DBConfig::GetConfig(context).options.disabled_optimizers;
 	disabled_optimizers.insert(OptimizerType::IN_CLAUSE);
 	disabled_optimizers.insert(OptimizerType::COMPRESSED_MATERIALIZATION);
-    // todo: update filter+read index
-    disabled_optimizers.insert(OptimizerType::STATISTICS_PROPAGATION);
+//    // todo: update filter+read index
+//    disabled_optimizers.insert(OptimizerType::STATISTICS_PROPAGATION);
 	DBConfig::GetConfig(*new_conn.context).options.disabled_optimizers = disabled_optimizers;
 
 	query_plan = new_conn.context->ExtractPlan(data.query);
+
+    Printer::Print("optimized logical plan");
+    query_plan->Print();
 	return DuckDBToSubstrait(context, *query_plan);
 }
 
@@ -439,8 +442,8 @@ void PlanTest(ClientContext &context, const std::string &serialized, Connection 
 
     // debug
     std::queue<std::vector<int32_t>> column_indexes;
-    column_indexes.emplace(std::vector<int32_t>{1, 3});
-    column_indexes.emplace(std::vector<int32_t>{0, 3, 0, 1});
+    column_indexes.emplace(std::vector<int32_t>{0, 3});
+    column_indexes.emplace(std::vector<int32_t>{0, 1, 2, 3});
     std::queue<std::vector<std::string>> expr_names;
     expr_names.emplace(std::vector<std::string>{"movie_id", "keyword"});
     expr_names.emplace(std::vector<std::string>{"id", "title", "movie_id", "keyword"});
@@ -508,6 +511,7 @@ void PlanTest(ClientContext &context, const std::string &serialized, Connection 
 
         expr_names.pop();
 
+        // todo: construct the temp_table manually to speed it up
         auto test_select_temp_table = "SELECT " + test_select_item.append(" FROM ").append(temp_table_name).append(";");
         Printer::Print(test_select_temp_table);
 
@@ -519,15 +523,9 @@ void PlanTest(ClientContext &context, const std::string &serialized, Connection 
 
         GetMergedPlan(&subquery_queue.front(), temp_table_substrait_plan.mutable_relations(0)->mutable_root()
             ->mutable_input()->mutable_project()->mutable_input()->mutable_read());
-
-        // todo: update the index of the second subquery
-        subquery_queue.front().mutable_project()->mutable_input()->mutable_join()
-                ->mutable_expression()->mutable_scalar_function()->mutable_arguments(1)->mutable_value()
-                ->mutable_selection()->mutable_direct_reference()->mutable_struct_field()->set_field(2);
-
-        // todo: update expression indexes
-        subquery_queue.front().mutable_project()->mutable_expressions()->RemoveLast();
-        subquery_queue.front().mutable_project()->mutable_expressions()->RemoveLast();
+        
+        subquery_queue.front().mutable_project()->mutable_expressions(3)->mutable_selection()
+            ->mutable_direct_reference()->mutable_struct_field()->set_field(3);
 
         Printer::Print("after GetMergedPlan");
         Printer::Print(subquery_queue.front().DebugString());
