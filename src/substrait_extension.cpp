@@ -136,14 +136,13 @@ static DuckDBToSubstrait InitPlanExtractor(ClientContext &context, ToSubstraitFu
 	set<OptimizerType> disabled_optimizers = DBConfig::GetConfig(context).options.disabled_optimizers;
 	disabled_optimizers.insert(OptimizerType::IN_CLAUSE);
 	disabled_optimizers.insert(OptimizerType::COMPRESSED_MATERIALIZATION);
-//    // todo: update filter+read index
-//    disabled_optimizers.insert(OptimizerType::STATISTICS_PROPAGATION);
 	DBConfig::GetConfig(*new_conn.context).options.disabled_optimizers = disabled_optimizers;
 
 	query_plan = new_conn.context->ExtractPlan(data.query);
-
+#if ENABLE_DEBUG_PRIN
     Printer::Print("optimized logical plan");
     query_plan->Print();
+#endif
 	return DuckDBToSubstrait(context, *query_plan);
 }
 
@@ -350,10 +349,13 @@ bool GetSubQueries(substrait::Rel *plan_rel) {
 int debug_split = 1;
 
 bool GetMergedPlan(substrait::Rel *plan_rel, substrait::ReadRel *temp_table) {
+    // todo: get the split point
     if (plan_rel->split_point) {
 //        plan_rel->clear_join();
+#if ENABLE_DEBUG_PRIN
 //        Printer::Print("before plan_rel");
 //        Printer::Print(plan_rel.DebugString());
+#endif
 //        // merge with the temp table
 //        plan_rel->set_allocated_read(temp_table);
         return true;
@@ -362,8 +364,10 @@ bool GetMergedPlan(substrait::Rel *plan_rel, substrait::ReadRel *temp_table) {
         case substrait::Rel::RelTypeCase::kJoin:
             if (0 == debug_split) {
 //                plan_rel->clear_join();
+#if ENABLE_DEBUG_PRIN
 //                Printer::Print("before plan_rel");
 //                Printer::Print(plan_rel->DebugString());
+#endif
 //                // merge with the temp table
 //                plan_rel->set_allocated_read(temp_table);
                 return true;
@@ -425,10 +429,11 @@ void ExecuteSQL(ClientContext &context, Connection &conn, const std::string &sql
 void PlanTest(ClientContext &context, const std::string &serialized, Connection &new_conn) {
     // parse `serialized` json
     substrait::Plan plan;
-
+#if ENABLE_DEBUG_PRIN
     // debug
     Printer::Print("original plan json");
     Printer::Print(serialized);
+#endif
 
     google::protobuf::util::Status status = google::protobuf::util::JsonStringToMessage(serialized, &plan);
     if (!status.ok()) {
@@ -440,53 +445,53 @@ void PlanTest(ClientContext &context, const std::string &serialized, Connection 
     substrait::Plan subquery_plan;
     subquery_plan.CopyFrom(plan);
 
-    // debug
-    std::queue<std::vector<int32_t>> column_indexes;
-    column_indexes.emplace(std::vector<int32_t>{0, 3});
-    column_indexes.emplace(std::vector<int32_t>{0, 1, 2, 3});
-    std::queue<std::vector<std::string>> expr_names;
-    expr_names.emplace(std::vector<std::string>{"movie_id", "keyword"});
-    expr_names.emplace(std::vector<std::string>{"id", "title", "movie_id", "keyword"});
+    // todo: one potential optimization idea: we only select the necessary columns for each subquery
+
+    // std::queue<std::vector<int32_t>> column_indexes;
+    // std::queue<std::vector<std::string>> expr_names;
+    // todo: 1. decide the necessary indexes and names;
 
     substrait::Plan temp_table_substrait_plan;
     unique_ptr<QueryResult> substrait_result;
 
     while (!subquery_queue.empty()) {
-        subquery_plan.clear_relations();
-
+#if ENABLE_DEBUG_PRIN
         Printer::Print("before adaption");
         Printer::Print(subquery_queue.front().DebugString());
+#endif
 
         // add projection head
         // add to root_rel_test
-        subquery_plan.add_relations()->mutable_root()->mutable_input()->mutable_project()->mutable_input()
+        subquery_plan.mutable_relations(0)->mutable_root()->mutable_input()->mutable_project()->mutable_input()
             ->CopyFrom(subquery_queue.front());
-        // add column indexes
-        // todo: get column indexes
-        subquery_plan.mutable_relations(0)->mutable_root()->mutable_input()->mutable_project()->clear_expressions();
-        for (size_t idx = 0; idx < column_indexes.front().size(); idx++) {
-            subquery_plan.mutable_relations(0)->mutable_root()->mutable_input()->mutable_project()->add_expressions()
-                    ->mutable_selection()->mutable_direct_reference()->mutable_struct_field()->set_field(column_indexes.front()[idx]);
-            subquery_plan.mutable_relations(0)->mutable_root()->mutable_input()->mutable_project()->mutable_expressions(idx)
-                    ->mutable_selection()->mutable_root_reference();
-        }
-        column_indexes.pop();
+//        // add column indexes
+//        subquery_plan.mutable_relations(0)->mutable_root()->mutable_input()->mutable_project()->clear_expressions();
+//        for (size_t idx = 0; idx < column_indexes.front().size(); idx++) {
+//            subquery_plan.mutable_relations(0)->mutable_root()->mutable_input()->mutable_project()->add_expressions()
+//                    ->mutable_selection()->mutable_direct_reference()->mutable_struct_field()->set_field(column_indexes.front()[idx]);
+//            subquery_plan.mutable_relations(0)->mutable_root()->mutable_input()->mutable_project()->mutable_expressions(idx)
+//                    ->mutable_selection()->mutable_root_reference();
+//        }
+//        column_indexes.pop();
 
-        // add names for the next subquery
-        // todo: get column names
-        subquery_plan.mutable_relations(0)->mutable_root()->clear_names();
-        for (const auto &expr_name : expr_names.front()) {
-            subquery_plan.mutable_relations(0)->mutable_root()->add_names(expr_name);
-        }
+//        // add names for the next subquery
+//        subquery_plan.mutable_relations(0)->mutable_root()->clear_names();
+//        for (const auto &expr_name : expr_names.front()) {
+//            subquery_plan.mutable_relations(0)->mutable_root()->add_names(expr_name);
+//        }
 
+#if ENABLE_DEBUG_PRIN
         Printer::Print("subquery_plan");
         Printer::Print(subquery_plan.DebugString());
+#endif
         std::string sub_query_str;
         google::protobuf::util::MessageToJsonString(subquery_plan, &sub_query_str);
 
+#if ENABLE_DEBUG_PRIN
         // debug
         Printer::Print("subquery_plan json");
         Printer::Print(sub_query_str);
+#endif
 
         auto sub_relation = SubstraitPlanToDuckDBRel(new_conn, sub_query_str, true);
 
@@ -500,35 +505,48 @@ void PlanTest(ClientContext &context, const std::string &serialized, Connection 
         sub_relation->Create(temp_table_name);
 
         std::string test_select_item;
-        for (const auto &expr_name : expr_names.front()) {
-            test_select_item.append(temp_table_name).append(".").append(expr_name).append(",");
-        }
-        // delete the last comma
-        test_select_item.pop_back();
 
-        Printer::Print("test_select_item");
-        Printer::Print(test_select_item);
+        // option 1: only select the necessary columns
+//        for (const auto &expr_name : expr_names.front()) {
+//            test_select_item.append(temp_table_name).append(".").append(expr_name).append(",");
+//        }
+//        // delete the last comma
+//        test_select_item.pop_back();
+#if ENABLE_DEBUG_PRIN
+//        Printer::Print("test_select_item");
+//        Printer::Print(test_select_item);
+#endif
 
-        expr_names.pop();
+        // option 2: select all from temp_table
+        test_select_item = "*";
 
-        // todo: construct the temp_table manually to speed it up
+//        expr_names.pop();
+
+        // todo: one potential optimization idea: construct the temp_table manually to speed it up
         auto test_select_temp_table = "SELECT " + test_select_item.append(" FROM ").append(temp_table_name).append(";");
+#if ENABLE_DEBUG_PRIN
         Printer::Print(test_select_temp_table);
+#endif
 
         auto temp_table_plan = new_conn.context->ExtractPlan(test_select_temp_table);
 
         temp_table_substrait_plan = DuckDBToSubstrait(context, *temp_table_plan).GetPlan();
+#if ENABLE_DEBUG_PRIN
         Printer::Print("temp_table_substrait_plan");
         Printer::Print(temp_table_substrait_plan.DebugString());
+#endif
 
         GetMergedPlan(&subquery_queue.front(), temp_table_substrait_plan.mutable_relations(0)->mutable_root()
             ->mutable_input()->mutable_project()->mutable_input()->mutable_read());
-        
-        subquery_queue.front().mutable_project()->mutable_expressions(3)->mutable_selection()
-            ->mutable_direct_reference()->mutable_struct_field()->set_field(3);
 
+        // todo: update index after merge if we only select the necessary columns
+//        subquery_queue.front().mutable_project()->mutable_expressions(3)->mutable_selection()
+//            ->mutable_direct_reference()->mutable_struct_field()->set_field(3);
+
+#if ENABLE_DEBUG_PRIN
         Printer::Print("after GetMergedPlan");
         Printer::Print(subquery_queue.front().DebugString());
+#endif
     }
 
     // debug
@@ -554,9 +572,6 @@ void PlanTest(ClientContext &context, const std::string &serialized, Connection 
             collection->Append(append_state, *chunk);
         }
     }
-    // debug
-    Printer::Print("subs_col_coll");
-    collection->Print();
 
     subquery_plan.Clear();
     plan.Clear();
@@ -631,7 +646,6 @@ static void QuerySplit(ClientContext &context, TableFunctionInput &data_p, DataC
     // execute it
     PlanTest(context, serialized, new_conn);
 //    RelationTest(SubstraitPlanToDuckDBRel(new_conn, serialized, false));
-    Printer::Print("done");
 }
 
 void InitializeQuerySplit(Connection &con) {

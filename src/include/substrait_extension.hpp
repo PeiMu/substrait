@@ -13,6 +13,8 @@
 
 #include <queue>
 
+#define ENABLE_DEBUG_PRINT false
+
 namespace duckdb {
 
 class SubstraitExtension : public Extension {
