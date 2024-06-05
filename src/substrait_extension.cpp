@@ -139,7 +139,7 @@ static DuckDBToSubstrait InitPlanExtractor(ClientContext &context, ToSubstraitFu
 	DBConfig::GetConfig(*new_conn.context).options.disabled_optimizers = disabled_optimizers;
 
 	query_plan = new_conn.context->ExtractPlan(data.query);
-#if ENABLE_DEBUG_PRIN
+#if ENABLE_DEBUG_PRINT
     Printer::Print("optimized logical plan");
     query_plan->Print();
 #endif
@@ -352,7 +352,7 @@ bool GetMergedPlan(substrait::Rel *plan_rel, substrait::ReadRel *temp_table) {
     // todo: get the split point
     if (plan_rel->split_point) {
 //        plan_rel->clear_join();
-#if ENABLE_DEBUG_PRIN
+#if ENABLE_DEBUG_PRINT
 //        Printer::Print("before plan_rel");
 //        Printer::Print(plan_rel.DebugString());
 #endif
@@ -364,7 +364,7 @@ bool GetMergedPlan(substrait::Rel *plan_rel, substrait::ReadRel *temp_table) {
         case substrait::Rel::RelTypeCase::kJoin:
             if (0 == debug_split) {
 //                plan_rel->clear_join();
-#if ENABLE_DEBUG_PRIN
+#if ENABLE_DEBUG_PRINT
 //                Printer::Print("before plan_rel");
 //                Printer::Print(plan_rel->DebugString());
 #endif
@@ -426,20 +426,7 @@ void ExecuteSQL(ClientContext &context, Connection &conn, const std::string &sql
     auto sql_result = sql_relation->Execute();
 }
 
-void PlanTest(ClientContext &context, const std::string &serialized, Connection &new_conn) {
-    // parse `serialized` json
-    substrait::Plan plan;
-#if ENABLE_DEBUG_PRIN
-    // debug
-    Printer::Print("original plan json");
-    Printer::Print(serialized);
-#endif
-
-    google::protobuf::util::Status status = google::protobuf::util::JsonStringToMessage(serialized, &plan);
-    if (!status.ok()) {
-        throw std::runtime_error("Was not possible to convert JSON into Substrait plan: " + status.ToString());
-    }
-
+unique_ptr<QueryResult> PlanTest(ClientContext &context, substrait::Plan plan, Connection &new_conn) {
     GetSubQueries(plan.mutable_relations(0)->mutable_root()->mutable_input());
 
     substrait::Plan subquery_plan;
@@ -455,7 +442,7 @@ void PlanTest(ClientContext &context, const std::string &serialized, Connection 
     unique_ptr<QueryResult> substrait_result;
 
     while (!subquery_queue.empty()) {
-#if ENABLE_DEBUG_PRIN
+#if ENABLE_DEBUG_PRINT
         Printer::Print("before adaption");
         Printer::Print(subquery_queue.front().DebugString());
 #endif
@@ -480,20 +467,13 @@ void PlanTest(ClientContext &context, const std::string &serialized, Connection 
 //            subquery_plan.mutable_relations(0)->mutable_root()->add_names(expr_name);
 //        }
 
-#if ENABLE_DEBUG_PRIN
+#if ENABLE_DEBUG_PRINT
         Printer::Print("subquery_plan");
         Printer::Print(subquery_plan.DebugString());
 #endif
-        std::string sub_query_str;
-        google::protobuf::util::MessageToJsonString(subquery_plan, &sub_query_str);
 
-#if ENABLE_DEBUG_PRIN
-        // debug
-        Printer::Print("subquery_plan json");
-        Printer::Print(sub_query_str);
-#endif
-
-        auto sub_relation = SubstraitPlanToDuckDBRel(new_conn, sub_query_str, true);
+        SubstraitToDuckDB transformer_s2d(new_conn, subquery_plan);
+        auto sub_relation = transformer_s2d.TransformPlan();
 
         subquery_queue.pop();
         if (subquery_queue.empty()) {
@@ -512,7 +492,7 @@ void PlanTest(ClientContext &context, const std::string &serialized, Connection 
 //        }
 //        // delete the last comma
 //        test_select_item.pop_back();
-#if ENABLE_DEBUG_PRIN
+#if ENABLE_DEBUG_PRINT
 //        Printer::Print("test_select_item");
 //        Printer::Print(test_select_item);
 #endif
@@ -524,14 +504,14 @@ void PlanTest(ClientContext &context, const std::string &serialized, Connection 
 
         // todo: one potential optimization idea: construct the temp_table manually to speed it up
         auto test_select_temp_table = "SELECT " + test_select_item.append(" FROM ").append(temp_table_name).append(";");
-#if ENABLE_DEBUG_PRIN
+#if ENABLE_DEBUG_PRINT
         Printer::Print(test_select_temp_table);
 #endif
 
         auto temp_table_plan = new_conn.context->ExtractPlan(test_select_temp_table);
 
         temp_table_substrait_plan = DuckDBToSubstrait(context, *temp_table_plan).GetPlan();
-#if ENABLE_DEBUG_PRIN
+#if ENABLE_DEBUG_PRINT
         Printer::Print("temp_table_substrait_plan");
         Printer::Print(temp_table_substrait_plan.DebugString());
 #endif
@@ -543,39 +523,17 @@ void PlanTest(ClientContext &context, const std::string &serialized, Connection 
 //        subquery_queue.front().mutable_project()->mutable_expressions(3)->mutable_selection()
 //            ->mutable_direct_reference()->mutable_struct_field()->set_field(3);
 
-#if ENABLE_DEBUG_PRIN
+#if ENABLE_DEBUG_PRINT
         Printer::Print("after GetMergedPlan");
         Printer::Print(subquery_queue.front().DebugString());
 #endif
     }
 
-    // debug
-    vector<LogicalType> types = substrait_result->types;
-	unique_ptr<MaterializedQueryResult> result_materialized;
-    auto collection = make_uniq<ColumnDataCollection>(Allocator::DefaultAllocator(), types);
-    if (substrait_result->type == QueryResultType::STREAM_RESULT) {
-        auto &stream_query = substrait_result->Cast<duckdb::StreamQueryResult>();
-        result_materialized = stream_query.Materialize();
-        collection = make_uniq<ColumnDataCollection>(result_materialized->Collection());
-    } else if (substrait_result->type == QueryResultType::MATERIALIZED_RESULT) {
-        ColumnDataAppendState append_state;
-        collection->InitializeAppend(append_state);
-        unique_ptr<DataChunk> chunk;
-        ErrorData error;
-        while (true) {
-            substrait_result->TryFetch(chunk, error);
-            if (!chunk || chunk->size() == 0) {
-                break;
-            }
-            // set chunk cardinality
-            chunk->SetCardinality(chunk->size());
-            collection->Append(append_state, *chunk);
-        }
-    }
-
     subquery_plan.Clear();
     plan.Clear();
     temp_table_substrait_plan.Clear();
+
+    return substrait_result;
 }
 
 void RelationTest(const shared_ptr<Relation>& relation) {
@@ -638,14 +596,40 @@ static void QuerySplit(ClientContext &context, TableFunctionInput &data_p, DataC
 	auto new_conn = Connection(*context.db);
 
 	unique_ptr<LogicalOperator> query_plan;
-	string serialized;
-	ToJsonFunctionInternal(context, data, output, new_conn, query_plan, serialized);
+    auto transformer_d2s = InitPlanExtractor(context, data, new_conn, query_plan);
+    auto substrait_plan = transformer_d2s.GetPlan();
+    // execute it
+    auto res = PlanTest(context, substrait_plan, new_conn);
+//    RelationTest(SubstraitPlanToDuckDBRel(new_conn, serialized, false));
+
+    // debug
+    vector<LogicalType> types = res->types;
+	unique_ptr<MaterializedQueryResult> result_materialized;
+    auto collection = make_uniq<ColumnDataCollection>(Allocator::DefaultAllocator(), types);
+    if (res->type == QueryResultType::STREAM_RESULT) {
+        auto &stream_query = res->Cast<duckdb::StreamQueryResult>();
+        result_materialized = stream_query.Materialize();
+        collection = make_uniq<ColumnDataCollection>(result_materialized->Collection());
+    } else if (res->type == QueryResultType::MATERIALIZED_RESULT) {
+        ColumnDataAppendState append_state;
+        collection->InitializeAppend(append_state);
+        unique_ptr<DataChunk> chunk;
+        ErrorData error;
+        while (true) {
+            res->TryFetch(chunk, error);
+            if (!chunk || chunk->size() == 0) {
+                break;
+            }
+            // set chunk cardinality
+            chunk->SetCardinality(chunk->size());
+            collection->Append(append_state, *chunk);
+        }
+    }
+
+    Printer::Print("query split result:");
+    collection->Print();
 
 	data.finished = true;
-
-    // execute it
-    PlanTest(context, serialized, new_conn);
-//    RelationTest(SubstraitPlanToDuckDBRel(new_conn, serialized, false));
 }
 
 void InitializeQuerySplit(Connection &con) {
@@ -660,6 +644,115 @@ void InitializeQuerySplit(Connection &con) {
 	catalog.CreateTableFunction(*con.context, query_split_info);
 }
 
+shared_ptr<Relation> SubstraitPlanToDuckDBRel(Connection &conn, const substrait::Plan &substrait_plan) {
+    SubstraitToDuckDB transformer_s2d(conn, substrait_plan);
+    return transformer_s2d.TransformPlan();
+}
+
+static void EndToEndFunctionInternal(ClientContext &context, ToSubstraitFunctionData &data, DataChunk &output,
+                                   Connection &new_conn, unique_ptr<LogicalOperator> &query_plan) {
+    auto transformer_d2s = InitPlanExtractor(context, data, new_conn, query_plan);
+    auto substrait_plan = transformer_d2s.GetPlan();
+
+#if ENABLE_DEBUG_PRINT
+        Printer::Print("substrait_plan");
+        Printer::Print(substrait_plan.DebugString());
+#endif
+
+    auto duckdb_rel = SubstraitPlanToDuckDBRel(new_conn, substrait_plan);
+#if ENABLE_DEBUG_PRINT
+    Printer::Print("duckdb_rel");
+    duckdb_rel->Print();
+#endif
+
+    timespec timer = tic();
+    auto res = duckdb_rel->Execute();
+    toc(&timer, "Duckdb::Relation execution time is\n");
+
+    // debug: print the result
+    vector<LogicalType> types = res->types;
+    unique_ptr<MaterializedQueryResult> result_materialized;
+    auto collection = make_uniq<ColumnDataCollection>(Allocator::DefaultAllocator(), types);
+    if (res->type == QueryResultType::STREAM_RESULT) {
+        auto &stream_query = res->Cast<duckdb::StreamQueryResult>();
+        result_materialized = stream_query.Materialize();
+        collection = make_uniq<ColumnDataCollection>(result_materialized->Collection());
+    } else if (res->type == QueryResultType::MATERIALIZED_RESULT) {
+        ColumnDataAppendState append_state;
+        collection->InitializeAppend(append_state);
+        unique_ptr<DataChunk> chunk;
+        ErrorData error;
+        while (true) {
+            res->TryFetch(chunk, error);
+            if (!chunk || chunk->size() == 0) {
+                break;
+            }
+            // set chunk cardinality
+            chunk->SetCardinality(chunk->size());
+            collection->Append(append_state, *chunk);
+        }
+    }
+    Printer::Print("result: ");
+    collection->Print();
+
+    // todo: uncomment once setting `return_types` and `names` in `EndToEndBind`.
+//    auto result_chunk = res->Fetch();
+//    if (!result_chunk) {
+//        Printer::Print("Error: result is empty!");
+//        return;
+//    }
+//    output.Move(*result_chunk);
+}
+
+static void EndToEndFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+    auto &data = (ToSubstraitFunctionData &)*data_p.bind_data;
+    if (data.finished) {
+        return;
+    }
+    auto new_conn = Connection(*context.db);
+
+    unique_ptr<LogicalOperator> query_plan;
+    EndToEndFunctionInternal(context, data, output, new_conn, query_plan);
+
+    data.finished = true;
+}
+
+static unique_ptr<FunctionData> EndToEndBind(ClientContext &context, TableFunctionBindInput &input,
+                                           vector<LogicalType> &return_types, vector<string> &names) {
+    // todo: get the duckdb_rel after converting the substrait::Plan to relation
+//    for (auto &column : duckdb_rel->Columns()) {
+//        return_types.emplace_back(column.Type());
+//        names.emplace_back(column.Name());
+//    }
+
+    return_types.emplace_back(LogicalType::VARCHAR);
+    names.emplace_back("Json");
+    auto result = InitToSubstraitFunctionData(context.config, input);
+    return std::move(result);
+}
+
+void InitializeEndToEnd(Connection &con) {
+    auto &catalog = Catalog::GetSystemCatalog(*con.context);
+
+    // the end to end function combining with "InitializeGetSubstraitJSON" and "InitializeFromSubstraitJSON"
+    TableFunction end_to_end("end_to_end", {LogicalType::VARCHAR}, EndToEndFunction, EndToEndBind);
+
+    end_to_end.named_parameters["enable_optimizer"] = LogicalType::BOOLEAN;
+    CreateTableFunctionInfo end_to_end_info(end_to_end);
+    catalog.CreateTableFunction(*con.context, end_to_end_info);
+}
+
+void InitializeQuerySplitEndToEnd(Connection &con) {
+    auto &catalog = Catalog::GetSystemCatalog(*con.context);
+
+    // the end to end function combining with "InitializeGetSubstraitJSON" and "InitializeFromSubstraitJSON"
+    TableFunction end_to_end("end_to_end_query_split", {LogicalType::VARCHAR}, QuerySplit, EndToEndBind);
+
+    end_to_end.named_parameters["enable_optimizer"] = LogicalType::BOOLEAN;
+    CreateTableFunctionInfo end_to_end_info(end_to_end);
+    catalog.CreateTableFunction(*con.context, end_to_end_info);
+}
+
 void SubstraitExtension::Load(DuckDB &db) {
 	Connection con(db);
 	con.BeginTransaction();
@@ -671,6 +764,10 @@ void SubstraitExtension::Load(DuckDB &db) {
 	InitializeFromSubstraitJSON(con);
 
     InitializeQuerySplit(con);
+
+    InitializeEndToEnd(con);
+
+    InitializeQuerySplitEndToEnd(con);
 
 	con.Commit();
 }

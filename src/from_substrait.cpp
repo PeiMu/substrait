@@ -86,6 +86,18 @@ SubstraitToDuckDB::SubstraitToDuckDB(Connection &con_p, const string &serialized
 	}
 }
 
+SubstraitToDuckDB::SubstraitToDuckDB(Connection &con_p, substrait::Plan substrait_plan) : con(con_p), plan(std::move(substrait_plan)) {
+    auto http_state = HTTPState::TryGetState(*con_p.context);
+    http_state->Reset();
+
+    for (auto &sext : plan.extensions()) {
+        if (!sext.has_extension_function()) {
+            continue;
+        }
+        functions_map[sext.extension_function().function_anchor()] = sext.extension_function().name();
+    }
+}
+
 unique_ptr<ParsedExpression> SubstraitToDuckDB::TransformLiteralExpr(const substrait::Expression &sexpr) {
 	const auto &slit = sexpr.literal();
 	Value dval;
