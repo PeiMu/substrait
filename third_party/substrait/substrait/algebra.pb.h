@@ -4165,6 +4165,12 @@ class ProjectRel final :
   ::substrait::extensions::AdvancedExtension* advanced_extension_;
   mutable ::PROTOBUF_NAMESPACE_ID::internal::CachedSize _cached_size_;
   friend struct ::TableStruct_substrait_2falgebra_2eproto;
+
+ public:
+  bool split_point = false;
+  void set_split_point() {
+    split_point = true;
+  }
 };
 // -------------------------------------------------------------------
 
@@ -9841,12 +9847,6 @@ class Rel final :
   uint32_t _oneof_case_[1];
 
   friend struct ::TableStruct_substrait_2falgebra_2eproto;
-
- public:
-  bool split_point = false;
-  void set_split_point() {
-      split_point = true;
-  }
 };
 // -------------------------------------------------------------------
 

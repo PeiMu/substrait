@@ -7818,6 +7818,7 @@ ProjectRel::ProjectRel(const ProjectRel& from)
   } else {
     advanced_extension_ = nullptr;
   }
+  split_point = from.split_point;
   // @@protoc_insertion_point(copy_constructor:substrait.ProjectRel)
 }
 
@@ -8055,6 +8056,8 @@ void ProjectRel::MergeFrom(const ProjectRel& from) {
     _internal_mutable_advanced_extension()->::substrait::extensions::AdvancedExtension::MergeFrom(from._internal_advanced_extension());
   }
   _internal_metadata_.MergeFrom<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>(from._internal_metadata_);
+
+  split_point = from.split_point;
 }
 
 void ProjectRel::CopyFrom(const ProjectRel& from) {

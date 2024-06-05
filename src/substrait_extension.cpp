@@ -301,43 +301,41 @@ void InitializeFromSubstraitJSON(Connection &con) {
 	catalog.CreateTableFunction(*con.context, from_sub_info_json);
 }
 
-std::queue<substrait::Rel > subquery_queue;
-
-bool GetSubQueries(substrait::Rel *plan_rel) {
+bool GetSubQueries(substrait::Rel *plan_rel, std::queue<substrait::Rel > &subquery_queue) {
     bool can_split = false;
     switch (plan_rel->rel_type_case()) {
         case substrait::Rel::RelTypeCase::kJoin:
-            GetSubQueries(plan_rel->mutable_join()->mutable_left());
-            GetSubQueries(plan_rel->mutable_join()->mutable_right());
+            GetSubQueries(plan_rel->mutable_join()->mutable_left(), subquery_queue);
+            GetSubQueries(plan_rel->mutable_join()->mutable_right(), subquery_queue);
             can_split = true;
             break;
         case substrait::Rel::RelTypeCase::kCross:
-            GetSubQueries(plan_rel->mutable_cross()->mutable_left());
-            GetSubQueries(plan_rel->mutable_cross()->mutable_right());
+            GetSubQueries(plan_rel->mutable_cross()->mutable_left(), subquery_queue);
+            GetSubQueries(plan_rel->mutable_cross()->mutable_right(), subquery_queue);
             break;
         case substrait::Rel::RelTypeCase::kFetch:
-            GetSubQueries(plan_rel->mutable_fetch()->mutable_input());
+            GetSubQueries(plan_rel->mutable_fetch()->mutable_input(), subquery_queue);
             break;
         case substrait::Rel::RelTypeCase::kFilter:
-            GetSubQueries(plan_rel->mutable_filter()->mutable_input());
+            GetSubQueries(plan_rel->mutable_filter()->mutable_input(), subquery_queue);
             break;
         case substrait::Rel::RelTypeCase::kProject:
-            if (GetSubQueries(plan_rel->mutable_project()->mutable_input())) {
-                plan_rel->set_split_point();
+            if (GetSubQueries(plan_rel->mutable_project()->mutable_input(), subquery_queue)) {
+                plan_rel->mutable_project()->set_split_point();
                 subquery_queue.emplace(*plan_rel);
             }
             break;
         case substrait::Rel::RelTypeCase::kAggregate:
-            GetSubQueries(plan_rel->mutable_aggregate()->mutable_input());
+            GetSubQueries(plan_rel->mutable_aggregate()->mutable_input(), subquery_queue);
             break;
         case substrait::Rel::RelTypeCase::kRead:
             break;
         case substrait::Rel::RelTypeCase::kSort:
-            GetSubQueries(plan_rel->mutable_sort()->mutable_input());
+            GetSubQueries(plan_rel->mutable_sort()->mutable_input(), subquery_queue);
             break;
         case substrait::Rel::RelTypeCase::kSet:
             // todo: fix when meet
-            GetSubQueries(plan_rel->mutable_set()->mutable_inputs(0));
+            GetSubQueries(plan_rel->mutable_set()->mutable_inputs(0), subquery_queue);
             break;
         default:
             throw InternalException("Unsupported relation type " + to_string(plan_rel->rel_type_case()));
@@ -345,34 +343,9 @@ bool GetSubQueries(substrait::Rel *plan_rel) {
     return can_split;
 }
 
-// debug
-int debug_split = 1;
-
 bool GetMergedPlan(substrait::Rel *plan_rel, substrait::ReadRel *temp_table) {
-    // todo: get the split point
-    if (plan_rel->split_point) {
-//        plan_rel->clear_join();
-#if ENABLE_DEBUG_PRINT
-//        Printer::Print("before plan_rel");
-//        Printer::Print(plan_rel.DebugString());
-#endif
-//        // merge with the temp table
-//        plan_rel->set_allocated_read(temp_table);
-        return true;
-    }
     switch (plan_rel->rel_type_case()) {
         case substrait::Rel::RelTypeCase::kJoin:
-            if (0 == debug_split) {
-//                plan_rel->clear_join();
-#if ENABLE_DEBUG_PRINT
-//                Printer::Print("before plan_rel");
-//                Printer::Print(plan_rel->DebugString());
-#endif
-//                // merge with the temp table
-//                plan_rel->set_allocated_read(temp_table);
-                return true;
-            }
-            debug_split--;
             GetMergedPlan(plan_rel->mutable_join()->mutable_left(), temp_table);
             GetMergedPlan(plan_rel->mutable_join()->mutable_right(), temp_table);
             break;
@@ -387,10 +360,12 @@ bool GetMergedPlan(substrait::Rel *plan_rel, substrait::ReadRel *temp_table) {
             GetMergedPlan(plan_rel->mutable_filter()->mutable_input(), temp_table);
             break;
         case substrait::Rel::RelTypeCase::kProject:
-            if (GetMergedPlan(plan_rel->mutable_project()->mutable_input(), temp_table)) {
+            if (plan_rel->mutable_project()->split_point) {
                 plan_rel->clear_project();
                 // merge with the temp table
                 plan_rel->mutable_read()->CopyFrom(*temp_table);
+            } else {
+                GetMergedPlan(plan_rel->mutable_project()->mutable_input(), temp_table);
             }
             break;
         case substrait::Rel::RelTypeCase::kAggregate:
@@ -427,7 +402,8 @@ void ExecuteSQL(ClientContext &context, Connection &conn, const std::string &sql
 }
 
 unique_ptr<QueryResult> PlanTest(ClientContext &context, substrait::Plan plan, Connection &new_conn) {
-    GetSubQueries(plan.mutable_relations(0)->mutable_root()->mutable_input());
+    std::queue<substrait::Rel > subquery_queue;
+    GetSubQueries(plan.mutable_relations(0)->mutable_root()->mutable_input(), subquery_queue);
 
     substrait::Plan subquery_plan;
     subquery_plan.CopyFrom(plan);
@@ -442,11 +418,6 @@ unique_ptr<QueryResult> PlanTest(ClientContext &context, substrait::Plan plan, C
     unique_ptr<QueryResult> substrait_result;
 
     while (!subquery_queue.empty()) {
-#if ENABLE_DEBUG_PRINT
-        Printer::Print("before adaption");
-        Printer::Print(subquery_queue.front().DebugString());
-#endif
-
         // add projection head
         // add to root_rel_test
         subquery_plan.mutable_relations(0)->mutable_root()->mutable_input()->mutable_project()->mutable_input()
@@ -516,7 +487,7 @@ unique_ptr<QueryResult> PlanTest(ClientContext &context, substrait::Plan plan, C
         Printer::Print(temp_table_substrait_plan.DebugString());
 #endif
 
-        GetMergedPlan(&subquery_queue.front(), temp_table_substrait_plan.mutable_relations(0)->mutable_root()
+        GetMergedPlan(subquery_queue.front().mutable_project()->mutable_input(), temp_table_substrait_plan.mutable_relations(0)->mutable_root()
             ->mutable_input()->mutable_project()->mutable_input()->mutable_read());
 
         // todo: update index after merge if we only select the necessary columns
@@ -632,18 +603,6 @@ static void QuerySplit(ClientContext &context, TableFunctionInput &data_p, DataC
 	data.finished = true;
 }
 
-void InitializeQuerySplit(Connection &con) {
-    auto &catalog = Catalog::GetSystemCatalog(*con.context);
-
-	// create the from_substrait table function that allows us to get a query
-	// result from a substrait plan
-	TableFunction query_split("query_split", {LogicalType::VARCHAR}, QuerySplit, ToJsonBind);
-
-	query_split.named_parameters["enable_optimizer"] = LogicalType::BOOLEAN;
-	CreateTableFunctionInfo query_split_info(query_split);
-	catalog.CreateTableFunction(*con.context, query_split_info);
-}
-
 shared_ptr<Relation> SubstraitPlanToDuckDBRel(Connection &conn, const substrait::Plan &substrait_plan) {
     SubstraitToDuckDB transformer_s2d(conn, substrait_plan);
     return transformer_s2d.TransformPlan();
@@ -746,7 +705,7 @@ void InitializeQuerySplitEndToEnd(Connection &con) {
     auto &catalog = Catalog::GetSystemCatalog(*con.context);
 
     // the end to end function combining with "InitializeGetSubstraitJSON" and "InitializeFromSubstraitJSON"
-    TableFunction end_to_end("end_to_end_query_split", {LogicalType::VARCHAR}, QuerySplit, EndToEndBind);
+    TableFunction end_to_end("query_split", {LogicalType::VARCHAR}, QuerySplit, EndToEndBind);
 
     end_to_end.named_parameters["enable_optimizer"] = LogicalType::BOOLEAN;
     CreateTableFunctionInfo end_to_end_info(end_to_end);
@@ -762,8 +721,6 @@ void SubstraitExtension::Load(DuckDB &db) {
 
 	InitializeFromSubstrait(con);
 	InitializeFromSubstraitJSON(con);
-
-    InitializeQuerySplit(con);
 
     InitializeEndToEnd(con);
 
