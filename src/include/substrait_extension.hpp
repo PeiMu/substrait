@@ -13,7 +13,7 @@
 
 #include <queue>
 
-#define ENABLE_DEBUG_PRINT false
+#define ENABLE_DEBUG_PRINT true
 
 namespace duckdb {
 
