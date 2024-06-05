@@ -317,14 +317,17 @@ bool GetSubQueries(substrait::Rel *plan_rel, subquery_queue &subquery_queue,
                 current_join_subquery.clear();
                 current_level_subquery.clear();
             }
-            break;
+            // we only insert if we get `current_level_subquery` (`current_join_subquery` here) from proj
+            return can_split;
         }
         case substrait::Rel::RelTypeCase::kProject:
             if (GetSubQueries(plan_rel->mutable_project()->mutable_input(), subquery_queue, current_level_subquery)) {
                 plan_rel->mutable_project()->set_split_point();
                 current_level_subquery.emplace_back(*plan_rel);
             }
-            return false;
+            // we only set split point here, and pass the `current_level_subquery` to the upper level
+            // do not actually insert plan_rel to the queue
+            return can_split;
         case substrait::Rel::RelTypeCase::kCross:
             GetSubQueries(plan_rel->mutable_cross()->mutable_left(), subquery_queue, current_level_subquery);
             GetSubQueries(plan_rel->mutable_cross()->mutable_right(), subquery_queue, current_level_subquery);
@@ -351,6 +354,7 @@ bool GetSubQueries(substrait::Rel *plan_rel, subquery_queue &subquery_queue,
             throw InternalException("Unsupported relation type " + to_string(plan_rel->rel_type_case()));
     }
 
+    // insert to the queue for the rest cases
     if (!current_level_subquery.empty()) {
         subquery_queue.emplace(current_level_subquery);
         current_level_subquery.clear();
