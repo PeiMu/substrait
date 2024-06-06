@@ -11,11 +11,15 @@
 #include "duckdb.hpp"
 #include "duckdb/optimizer/timer_util.h"
 
-#include <queue>
-
-#define ENABLE_DEBUG_PRINT true
-
 namespace duckdb {
+
+struct ToSubstraitFunctionData : public TableFunctionData {
+    ToSubstraitFunctionData() {
+    }
+    string query;
+    bool enable_optimizer;
+    bool finished = false;
+};
 
 class SubstraitExtension : public Extension {
 public:
@@ -23,20 +27,6 @@ public:
 	std::string Name() override;
 };
 
-//class QuerySplit {
-//public:
-//    QuerySplit() {
-//        root_rel_test = new substrait::RelRoot();
-//        res = new substrait::Rel();
-//    };
-//    ~QuerySplit() = default;
-//
-//    bool GetSubQueries(const substrait::Rel& plan_rel);
-//
-//public:
-//    substrait::RelRoot *root_rel_test;
-//    substrait::Rel *res;
-//    std::stack<substrait::Rel > subquery;
-//};
+shared_ptr<Relation> SubstraitPlanToDuckDBRel(Connection &conn, const string &serialized, bool json);
 
 } // namespace duckdb

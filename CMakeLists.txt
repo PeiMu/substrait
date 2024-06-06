@@ -101,7 +101,8 @@ set(EXTENSION_SOURCES
     src/custom_extensions.cpp
     src/custom_extensions_generated.cpp
     ${SUBSTRAIT_SOURCES}
-    ${PROTOBUF_SOURCES})
+    ${PROTOBUF_SOURCES}
+    src/query_split/query_split.cpp)
 
 add_library(${EXTENSION_NAME} STATIC ${EXTENSION_SOURCES})
 
