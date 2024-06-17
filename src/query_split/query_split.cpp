@@ -36,13 +36,14 @@ static DuckDBToSubstrait QuerySplitPlanExtractor(ClientContext &context, ToSubst
 }
 
 bool GetSubQueries(substrait::Rel *plan_rel, subquery_queue &subquery_queue,
-                   std::vector<substrait::Rel> &current_level_subquery) {
+                   std::vector<substrait_struct> &current_level_subquery,
+                   int &split_index) {
     bool can_split = false;
     switch (plan_rel->rel_type_case()) {
         case substrait::Rel::RelTypeCase::kJoin: {
-            std::vector<substrait::Rel> current_join_subquery;
-            GetSubQueries(plan_rel->mutable_join()->mutable_left(), subquery_queue, current_join_subquery);
-            GetSubQueries(plan_rel->mutable_join()->mutable_right(), subquery_queue, current_join_subquery);
+            std::vector<substrait_struct> current_join_subquery;
+            GetSubQueries(plan_rel->mutable_join()->mutable_left(), subquery_queue, current_join_subquery, split_index);
+            GetSubQueries(plan_rel->mutable_join()->mutable_right(), subquery_queue, current_join_subquery, split_index);
             can_split = true;
             if (!current_join_subquery.empty()) {
                 subquery_queue.emplace(current_join_subquery);
@@ -53,34 +54,39 @@ bool GetSubQueries(substrait::Rel *plan_rel, subquery_queue &subquery_queue,
             return can_split;
         }
         case substrait::Rel::RelTypeCase::kProject:
-            if (GetSubQueries(plan_rel->mutable_project()->mutable_input(), subquery_queue, current_level_subquery)) {
-                plan_rel->mutable_project()->set_split_point();
-                current_level_subquery.emplace_back(*plan_rel);
+            if (GetSubQueries(plan_rel->mutable_project()->mutable_input(), subquery_queue, current_level_subquery,
+                              split_index)) {
+                plan_rel->mutable_project()->set_split_point(split_index);
+                substrait_struct subquery_struct{*plan_rel, split_index};
+                std::string debug_info = "Split point: " + std::to_string(split_index) + ": " + plan_rel->DebugString();
+                Printer::Print(debug_info);
+                split_index++;
+                current_level_subquery.emplace_back(subquery_struct);
             }
             // we only set split point here, and pass the `current_level_subquery` to the upper level
             // do not actually insert plan_rel to the queue
             return can_split;
         case substrait::Rel::RelTypeCase::kCross:
-            GetSubQueries(plan_rel->mutable_cross()->mutable_left(), subquery_queue, current_level_subquery);
-            GetSubQueries(plan_rel->mutable_cross()->mutable_right(), subquery_queue, current_level_subquery);
+            GetSubQueries(plan_rel->mutable_cross()->mutable_left(), subquery_queue, current_level_subquery, split_index);
+            GetSubQueries(plan_rel->mutable_cross()->mutable_right(), subquery_queue, current_level_subquery, split_index);
             break;
         case substrait::Rel::RelTypeCase::kFetch:
-            GetSubQueries(plan_rel->mutable_fetch()->mutable_input(), subquery_queue, current_level_subquery);
+            GetSubQueries(plan_rel->mutable_fetch()->mutable_input(), subquery_queue, current_level_subquery, split_index);
             break;
         case substrait::Rel::RelTypeCase::kFilter:
-            GetSubQueries(plan_rel->mutable_filter()->mutable_input(), subquery_queue, current_level_subquery);
+            GetSubQueries(plan_rel->mutable_filter()->mutable_input(), subquery_queue, current_level_subquery, split_index);
             break;
         case substrait::Rel::RelTypeCase::kAggregate:
-            GetSubQueries(plan_rel->mutable_aggregate()->mutable_input(), subquery_queue, current_level_subquery);
+            GetSubQueries(plan_rel->mutable_aggregate()->mutable_input(), subquery_queue, current_level_subquery, split_index);
             break;
         case substrait::Rel::RelTypeCase::kRead:
             break;
         case substrait::Rel::RelTypeCase::kSort:
-            GetSubQueries(plan_rel->mutable_sort()->mutable_input(), subquery_queue, current_level_subquery);
+            GetSubQueries(plan_rel->mutable_sort()->mutable_input(), subquery_queue, current_level_subquery, split_index);
             break;
         case substrait::Rel::RelTypeCase::kSet:
             // todo: fix when meet
-            GetSubQueries(plan_rel->mutable_set()->mutable_inputs(0), subquery_queue, current_level_subquery);
+            GetSubQueries(plan_rel->mutable_set()->mutable_inputs(0), subquery_queue, current_level_subquery, split_index);
             break;
         default:
             throw InternalException("Unsupported relation type " + to_string(plan_rel->rel_type_case()));
@@ -95,47 +101,73 @@ bool GetSubQueries(substrait::Rel *plan_rel, subquery_queue &subquery_queue,
     return can_split;
 }
 
-bool GetMergedPlan(substrait::Rel *plan_rel, substrait::ReadRel *temp_table) {
+bool GetMergedPlan(substrait::Rel *plan_rel, substrait::ReadRel *temp_table, int merge_index) {
+    bool merged_success = false;
     switch (plan_rel->rel_type_case()) {
         case substrait::Rel::RelTypeCase::kJoin:
-            GetMergedPlan(plan_rel->mutable_join()->mutable_left(), temp_table);
-            GetMergedPlan(plan_rel->mutable_join()->mutable_right(), temp_table);
+        {
+            bool left_merged_success = GetMergedPlan(plan_rel->mutable_join()->mutable_left(), temp_table, merge_index);
+            bool right_merged_success = GetMergedPlan(plan_rel->mutable_join()->mutable_right(), temp_table, merge_index);
+            merged_success = left_merged_success | right_merged_success;
             break;
+        }
         case substrait::Rel::RelTypeCase::kCross:
-            GetMergedPlan(plan_rel->mutable_cross()->mutable_left(), temp_table);
-            GetMergedPlan(plan_rel->mutable_cross()->mutable_right(), temp_table);
+        {
+            bool left_merged_success = GetMergedPlan(plan_rel->mutable_cross()->mutable_left(), temp_table, merge_index);
+            bool right_merged_success = GetMergedPlan(plan_rel->mutable_cross()->mutable_right(), temp_table, merge_index);
+            merged_success = left_merged_success | right_merged_success;
             break;
+        }
         case substrait::Rel::RelTypeCase::kFetch:
-            GetMergedPlan(plan_rel->mutable_fetch()->mutable_input(), temp_table);
+            merged_success = GetMergedPlan(plan_rel->mutable_fetch()->mutable_input(), temp_table, merge_index);
             break;
         case substrait::Rel::RelTypeCase::kFilter:
-            GetMergedPlan(plan_rel->mutable_filter()->mutable_input(), temp_table);
+            merged_success = GetMergedPlan(plan_rel->mutable_filter()->mutable_input(), temp_table, merge_index);
             break;
         case substrait::Rel::RelTypeCase::kProject:
-            if (plan_rel->mutable_project()->split_point) {
+            if (plan_rel->mutable_project()->split_point == merge_index) {
                 plan_rel->clear_project();
                 // merge with the temp table
                 plan_rel->mutable_read()->CopyFrom(*temp_table);
+                std::string debug_info = "Merge point: " + std::to_string(merge_index) + ": " + plan_rel->DebugString();
+                Printer::Print(debug_info);
+                merged_success = true;
             } else {
-                GetMergedPlan(plan_rel->mutable_project()->mutable_input(), temp_table);
+                merged_success = GetMergedPlan(plan_rel->mutable_project()->mutable_input(), temp_table, merge_index);
             }
             break;
         case substrait::Rel::RelTypeCase::kAggregate:
-            GetMergedPlan(plan_rel->mutable_aggregate()->mutable_input(), temp_table);
+            merged_success = GetMergedPlan(plan_rel->mutable_aggregate()->mutable_input(), temp_table, merge_index);
             break;
         case substrait::Rel::RelTypeCase::kRead:
             break;
         case substrait::Rel::RelTypeCase::kSort:
-            GetMergedPlan(plan_rel->mutable_sort()->mutable_input(), temp_table);
+            merged_success = GetMergedPlan(plan_rel->mutable_sort()->mutable_input(), temp_table, merge_index);
             break;
         case substrait::Rel::RelTypeCase::kSet:
             // todo: fix when meet
-            GetMergedPlan(plan_rel->mutable_set()->mutable_inputs(0), temp_table);
+            merged_success = GetMergedPlan(plan_rel->mutable_set()->mutable_inputs(0), temp_table, merge_index);
             break;
         default:
             throw InternalException("Unsupported relation type " + to_string(plan_rel->rel_type_case()));
     }
-    return false;
+    return merged_success;
+}
+
+void GetMergedPlanPair(std::vector<substrait_struct> &current_level_children, substrait::ReadRel *temp_table,
+                       int merge_index) {
+    for (auto & child : current_level_children) {
+        if (GetMergedPlan(child.subquery.mutable_project()->mutable_input(), temp_table, merge_index)) {
+            // todo: update index after merge if we only select the necessary columns
+//        subquery_queue.front().mutable_project()->mutable_expressions(3)->mutable_selection()
+//            ->mutable_direct_reference()->mutable_struct_field()->set_field(3);
+
+#if ENABLE_DEBUG_PRINT
+            Printer::Print("after GetMergedPlan");
+            Printer::Print(child.subquery.DebugString());
+#endif
+        }
+    }
 }
 
 // debug function
@@ -205,9 +237,15 @@ void RelationTest(const shared_ptr<Relation>& relation) {
 }
 
 unique_ptr<QueryResult> PlanTest(ClientContext &context, substrait::Plan plan, Connection &new_conn) {
+#if ENABLE_DEBUG_PRINT
+    Printer::Print("init plan");
+    Printer::Print(plan.DebugString());
+#endif
     subquery_queue subquery_queue;
-    std::vector<substrait::Rel> current_level_subquery;
-    GetSubQueries(plan.mutable_relations(0)->mutable_root()->mutable_input(), subquery_queue, current_level_subquery);
+    std::vector<substrait_struct> current_level_subquery;
+    int split_index = 0;
+    GetSubQueries(plan.mutable_relations(0)->mutable_root()->mutable_input(), subquery_queue, current_level_subquery,
+                  split_index);
 
     substrait::Plan subquery_plan;
     subquery_plan.CopyFrom(plan);
@@ -226,7 +264,7 @@ unique_ptr<QueryResult> PlanTest(ClientContext &context, substrait::Plan plan, C
         // add to root_rel_test
         // todo: execute in parallel
         subquery_plan.mutable_relations(0)->mutable_root()->mutable_input()->mutable_project()->mutable_input()
-                ->CopyFrom(subquery_queue.front()[0]);
+                ->CopyFrom(subquery_queue.front()[0].subquery);
 //        // add column indexes
 //        subquery_plan.mutable_relations(0)->mutable_root()->mutable_input()->mutable_project()->clear_expressions();
 //        for (size_t idx = 0; idx < column_indexes.front().size(); idx++) {
@@ -251,12 +289,16 @@ unique_ptr<QueryResult> PlanTest(ClientContext &context, substrait::Plan plan, C
         SubstraitToDuckDB transformer_s2d(new_conn, subquery_plan);
         auto sub_relation = transformer_s2d.TransformPlan();
 
+        // todo: execute in parallel
+        int merge_index = subquery_queue.front()[0].split_index;
+
         subquery_queue.pop();
         if (subquery_queue.empty()) {
             substrait_result = sub_relation->Execute();
             break;
         }
 
+        // todo: need sub-name when supporting parallel
         std::string temp_table_name = "temp_table_" + std::to_string(subquery_queue.size());
         sub_relation->Create(temp_table_name);
 
@@ -292,17 +334,8 @@ unique_ptr<QueryResult> PlanTest(ClientContext &context, substrait::Plan plan, C
         Printer::Print(temp_table_substrait_plan.DebugString());
 #endif
 
-        GetMergedPlan(subquery_queue.front()[0].mutable_project()->mutable_input(), temp_table_substrait_plan.mutable_relations(0)->mutable_root()
-                ->mutable_input()->mutable_project()->mutable_input()->mutable_read());
-
-        // todo: update index after merge if we only select the necessary columns
-//        subquery_queue.front().mutable_project()->mutable_expressions(3)->mutable_selection()
-//            ->mutable_direct_reference()->mutable_struct_field()->set_field(3);
-
-#if ENABLE_DEBUG_PRINT
-        Printer::Print("after GetMergedPlan");
-        Printer::Print(subquery_queue.front()[0].DebugString());
-#endif
+        GetMergedPlanPair(subquery_queue.front(), temp_table_substrait_plan.mutable_relations(0)->mutable_root()
+                ->mutable_input()->mutable_project()->mutable_input()->mutable_read(), merge_index);
     }
 
     subquery_plan.Clear();

@@ -4167,9 +4167,9 @@ class ProjectRel final :
   friend struct ::TableStruct_substrait_2falgebra_2eproto;
 
  public:
-  bool split_point = false;
-  void set_split_point() {
-    split_point = true;
+  int split_point = -1;
+  void set_split_point(int index) {
+    split_point = index;
   }
 };
 // -------------------------------------------------------------------

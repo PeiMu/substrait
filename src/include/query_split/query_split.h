@@ -29,7 +29,12 @@
 
 namespace duckdb {
 
-using subquery_queue = std::queue<std::vector<substrait::Rel>>;
+struct substrait_struct {
+    substrait::Rel subquery;
+    int split_index;
+};
+
+using subquery_queue = std::queue<std::vector<substrait_struct>>;
 
 void QuerySplit(ClientContext &context, TableFunctionInput &data_p, DataChunk &output);
 
