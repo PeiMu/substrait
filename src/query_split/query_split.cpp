@@ -263,8 +263,19 @@ unique_ptr<QueryResult> PlanTest(ClientContext &context, substrait::Plan plan, C
         // add projection head
         // add to root_rel_test
         // todo: execute in parallel
-        subquery_plan.mutable_relations(0)->mutable_root()->mutable_input()->mutable_project()->mutable_input()
-                ->CopyFrom(subquery_queue.front()[0].subquery);
+        if (1 == subquery_queue.size()) {
+            Printer::Print("one last subquery");
+            subquery_plan.CopyFrom(plan);
+            auto mutable_proj = subquery_plan.mutable_relations(0)->mutable_root()->mutable_input()->mutable_project();
+            bool has_aggregate = mutable_proj->mutable_input()->has_aggregate();
+            if (has_aggregate) {
+                subquery_plan.mutable_relations(0)->mutable_root()->mutable_input()->mutable_project()->mutable_input()
+                        ->mutable_aggregate()->mutable_input()->CopyFrom(subquery_queue.front()[0].subquery);
+            }
+        } else {
+            subquery_plan.mutable_relations(0)->mutable_root()->mutable_input()->mutable_project()->mutable_input()
+                    ->CopyFrom(subquery_queue.front()[0].subquery);
+        }
 //        // add column indexes
 //        subquery_plan.mutable_relations(0)->mutable_root()->mutable_input()->mutable_project()->clear_expressions();
 //        for (size_t idx = 0; idx < column_indexes.front().size(); idx++) {
