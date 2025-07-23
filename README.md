@@ -6,6 +6,8 @@ The main goal of this extension is to support a both production and consumption 
 
 To build, type 
 ```
+git submodule update --init --recursive
+git submodule update --remote
 make
 ```
 
